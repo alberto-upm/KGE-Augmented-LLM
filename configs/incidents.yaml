@@ -1,0 +1,73 @@
+graph:
+  name: incidents
+  format: ttl
+  path: data/incidents/raw/filtrado.ttl
+  block_predicate: "rdf:type"
+  block_value: "repcon:incident"
+  prefixes:
+    repcon: "http://repcon.org/schema#"
+    rdf: "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+  interaction_order:
+    - {uri: "repcon:int_hasCustomer",    label: "Cliente",            active: true}
+    - {uri: "repcon:hasUser",            label: "Usuario",            active: false}
+    - {uri: "repcon:hasTypeInc",         label: "Tipo de incidencia", active: true}
+    - {uri: "repcon:incident_hasOrigin", label: "Origen",             active: true}
+    - {uri: "repcon:hasSupportGroup",    label: "Grupo de soporte",   active: true}
+    - {uri: "repcon:hasTechnician",      label: "Técnico",            active: true}
+    - {uri: "repcon:hasSupportCategory", label: "Categoría",          active: true}
+  passive_properties:
+    - "repcon:hasStateIncident"
+    - "repcon:hasSupportTeam"
+    - "repcon:hasExternalTechnician"
+
+split:
+  test_system_ratio: 0.10
+  kge_val_ratio: 0.10
+  kge_test_ratio: 0.10
+  seed: 42
+  out_dir: data/incidents/splits
+
+rules:
+  anyburl_jar: tools/AnyBURL.jar
+  min_support: 10
+  confidence_threshold: 0.75
+  max_rule_length: 3
+  out_dir: data/incidents/rules
+
+kge:
+  candidates:
+    - {model: TransE,   embedding_dim: 200, epochs: 200}
+    - {model: DistMult, embedding_dim: 200, epochs: 200}
+    - {model: ComplEx,  embedding_dim: 200, epochs: 200}
+    - {model: RotatE,   embedding_dim: 200, epochs: 200}
+  shared:
+    batch_size: 1024
+    optimizer: adam
+    learning_rate: 0.001
+    loss: nssa
+    random_seed: 42
+  selection_metric: mrr
+  best_model_path: out/incidents/kge/best
+  comparison_path: out/incidents/kge/comparison.json
+
+cbr:
+  similarity: jaccard
+  top_k: 10
+
+fusion:
+  mode: cbr_preferred
+  top_k_final: 5
+  k_rrf: 60
+  w_kge: 0.7
+  w_cbr: 0.3
+
+llm:
+  backend: vllm
+  endpoint: "http://localhost:8000/v1"
+  model: "meta-llama/Meta-Llama-3-8B-Instruct"
+  temperature: 0.0
+  use_llm: true
+
+output:
+  out_dir: out/incidents
+  jsonl: out/incidents/created_incidents.jsonl

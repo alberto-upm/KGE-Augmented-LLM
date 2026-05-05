@@ -1,0 +1,64 @@
+graph:
+  name: dbpedia
+  format: pkl
+  path: data/dbpedia/raw/dbpedia_summaries.pkl
+  block_predicate: "rdf:type"
+  block_value: ""               # TODO: definir tras inspeccionar el pickle
+  prefixes:
+    dbo: "http://dbpedia.org/ontology/"
+    dbr: "http://dbpedia.org/resource/"
+    rdf: "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+  interaction_order: []          # TODO: poblar tras inspección del pickle
+  passive_properties: []
+
+split:
+  test_system_ratio: 0.10
+  kge_val_ratio: 0.10
+  kge_test_ratio: 0.10
+  seed: 42
+  out_dir: data/dbpedia/splits
+
+rules:
+  anyburl_jar: tools/AnyBURL.jar
+  min_support: 10
+  confidence_threshold: 0.5      # más permisivo para DBpedia
+  max_rule_length: 3
+  out_dir: data/dbpedia/rules
+
+kge:
+  candidates:
+    - {model: TransE,   embedding_dim: 200, epochs: 100}
+    - {model: DistMult, embedding_dim: 200, epochs: 100}
+    - {model: ComplEx,  embedding_dim: 200, epochs: 100}
+    - {model: RotatE,   embedding_dim: 200, epochs: 100}
+  shared:
+    batch_size: 1024
+    optimizer: adam
+    learning_rate: 0.001
+    loss: nssa
+    random_seed: 42
+  selection_metric: mrr
+  best_model_path: out/dbpedia/kge/best
+  comparison_path: out/dbpedia/kge/comparison.json
+
+cbr:
+  similarity: jaccard
+  top_k: 10
+
+fusion:
+  mode: cbr_preferred
+  top_k_final: 5
+  k_rrf: 60
+  w_kge: 0.7
+  w_cbr: 0.3
+
+llm:
+  backend: vllm
+  endpoint: "http://localhost:8000/v1"
+  model: "meta-llama/Meta-Llama-3-8B-Instruct"
+  temperature: 0.0
+  use_llm: true
+
+output:
+  out_dir: out/dbpedia
+  jsonl: out/dbpedia/created_entities.jsonl
