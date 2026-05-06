@@ -34,6 +34,12 @@ tqdm>=4.66.0
 pyyaml>=6.0
 scipy>=1.13.0
 
+# --- Reglas simbólicas (AnyBURL) ---
+PyClause @ git+https://github.com/symbolic-kg/PyClause.git
+
+# --- LLM serving (vLLM OpenAI-compatible client) ---
+openai>=1.0.0
+
 # --- Opcional: cuantización 4-bit para modelos 7B en GPU ---
 # bitsandbytes>=0.43.1
 

@@ -1,14 +1,24 @@
 graph:
   name: dbpedia
-  format: pkl
-  path: data/dbpedia/raw/dbpedia_summaries.pkl
-  block_predicate: "rdf:type"
-  block_value: ""               # TODO: definir tras inspeccionar el pickle
-  prefixes:
-    dbo: "http://dbpedia.org/ontology/"
-    dbr: "http://dbpedia.org/resource/"
-    rdf: "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-  interaction_order: []          # TODO: poblar tras inspección del pickle
+  format: tsv
+  path: data/dbpedia/raw/db100k_triples.txt
+  has_header: true
+  # DB100K no tiene un "tipo principal" como las incidencias: cada entidad-sujeto
+  # es un bloque. Dejamos block_predicate y block_value vacíos para indicarlo.
+  block_predicate: ""
+  block_value: ""
+  prefixes: {}
+  # Top relaciones por frecuencia. El bucle interactivo recorre las activas
+  # en orden; si una entidad concreta no tiene un valor para alguna, se hará skip.
+  interaction_order:
+    - {uri: "type",         label: "Tipo",                     active: true}
+    - {uri: "country",      label: "País",                     active: true}
+    - {uri: "isPartOf",     label: "Forma parte de",           active: true}
+    - {uri: "genre",        label: "Género",                   active: true}
+    - {uri: "birthPlace",   label: "Lugar de nacimiento",      active: true}
+    - {uri: "occupation",   label: "Ocupación",                active: true}
+    - {uri: "recordLabel",  label: "Sello discográfico",       active: false}
+    - {uri: "associatedBand", label: "Banda asociada",         active: false}
   passive_properties: []
 
 split:
@@ -21,7 +31,7 @@ split:
 rules:
   anyburl_jar: tools/AnyBURL.jar
   min_support: 10
-  confidence_threshold: 0.5      # más permisivo para DBpedia
+  confidence_threshold: 0.5      # más permisivo que en incidencias
   max_rule_length: 3
   out_dir: data/dbpedia/rules
 

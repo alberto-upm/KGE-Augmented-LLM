@@ -143,3 +143,69 @@ def load_best_for_inference(cfg: dict):
 
     best_path = Path(cfg["kge"]["best_model_path"])
     return PipelineResult.from_directory(str(best_path))
+
+
+class PyKEENScorer:
+    """Adaptador que cumple el protocolo `KGEScorer` de inference.py.
+
+    Para puntuar la propiedad `p` dada una configuración parcial `known`,
+    agrega los scores de cada par (head_known, p) → ?o de las relaciones ya
+    conocidas. Es una agregación heurística (suma), suficiente para ordenar
+    candidatos en este flujo.
+    """
+
+    def __init__(self, pipeline_result):
+        self.result = pipeline_result
+        self.model = pipeline_result.model
+        self.training = pipeline_result.training
+        self.entity_to_id = self.training.entity_to_id
+        self.relation_to_id = self.training.relation_to_id
+        self.id_to_entity = {i: e for e, i in self.entity_to_id.items()}
+
+    def _score_tails(self, head: str, relation: str, candidates_ids):
+        import torch
+
+        if head not in self.entity_to_id or relation not in self.relation_to_id:
+            return None
+        h = torch.tensor([[self.entity_to_id[head], self.relation_to_id[relation], 0]])
+        scores = self.model.predict_t(h.repeat(len(candidates_ids), 1), tails=candidates_ids)
+        return scores.detach().cpu().numpy().flatten()
+
+    def score_property(
+        self,
+        known_props: dict[str, str],
+        target_prop: str,
+        candidates: list[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        if target_prop not in self.relation_to_id:
+            return []
+
+        if candidates:
+            cand_ids = [self.entity_to_id[c] for c in candidates if c in self.entity_to_id]
+            cand_values = [self.id_to_entity[i] for i in cand_ids]
+        else:
+            cand_ids = list(range(len(self.entity_to_id)))
+            cand_values = [self.id_to_entity[i] for i in cand_ids]
+
+        if not cand_ids:
+            return []
+
+        agg = [0.0] * len(cand_ids)
+        n_used = 0
+        for prop, value in known_props.items():
+            scores = self._score_tails(value, target_prop, cand_ids)
+            if scores is None:
+                continue
+            for i, s in enumerate(scores):
+                agg[i] += float(s)
+            n_used += 1
+
+        if n_used == 0:
+            # sin información parcial: usamos la marginal de la relación
+            scores = self._score_tails(cand_values[0], target_prop, cand_ids)
+            if scores is None:
+                return [(v, 0.0) for v in cand_values]
+            agg = [float(s) for s in scores]
+
+        ranked = sorted(zip(cand_values, agg), key=lambda x: x[1], reverse=True)
+        return ranked

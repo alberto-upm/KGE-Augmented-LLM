@@ -135,28 +135,46 @@ def save_filtered(rules: list[Rule], cfg: dict) -> Path:
     return path
 
 
-def load_into_pyclause(rules_path: Path, cfg: dict):
+def load_into_pyclause(filtered_rules: list["Rule"], cfg: dict):
     """Carga las reglas filtradas en PyClause para inferencia.
 
-    Devuelve un objeto `RulesHandler` (pyclause) listo para `query`.
-    El nombre exacto del paquete y de las clases puede variar entre versiones
-    de PyClause; importamos perezosamente para no forzar la dependencia
-    cuando el usuario aún no la ha instalado.
+    PyClause espera:
+      - data: lista de tripletas (s, p, o) o ruta a fichero TSV
+      - rules: lista de strings "head <= body"
+      - stats: lista de [num_preds, support] por regla
+
+    Devuelve una tupla (loader, qa_handler) lista para responder consultas.
     """
     try:
-        from clause import Loader  # type: ignore
+        from c_clause import Loader, QAHandler  # type: ignore
+        from clause import Options  # type: ignore
     except ImportError as e:
         raise ImportError(
-            "No se pudo importar `clause` (PyClause). Instala con `pip install pyclause`."
+            "PyClause no está instalado. Instala con:\n"
+            "  pip install git+https://github.com/symbolic-kg/PyClause.git"
         ) from e
 
     splits_dir = Path(cfg["split"]["out_dir"])
-    train_tsv = splits_dir / "train.tsv"
+    train_tsv = str(splits_dir / "train.tsv")
 
-    loader = Loader()
-    loader.load_data(data=str(train_tsv))
-    loader.load_rules(rules=str(rules_path))
-    return loader
+    # Formateamos reglas y estadísticas para PyClause:
+    # stats[i] = [total_groundings, correct_predictions]
+    # confidence = correct_predictions / total_groundings
+    rule_strings = [f"{r.head} <= {r.body}" if r.body else r.head for r in filtered_rules]
+    stats = [
+        [r.support, max(1, int(r.support * r.confidence))]
+        for r in filtered_rules
+    ]
+
+    opts = Options()
+    opts.set("qa_handler.aggregation_function", "noisyor")
+
+    loader = Loader(options=opts.get("loader"))
+    loader.load_data(data=train_tsv)
+    loader.load_rules(rules=rule_strings, stats=stats)
+
+    qa = QAHandler(options=opts.get("qa_handler"))
+    return loader, qa
 
 
 def run_rule_mining(cfg: dict) -> Path:
@@ -167,3 +185,54 @@ def run_rule_mining(cfg: dict) -> Path:
         confidence_threshold=cfg["rules"]["confidence_threshold"],
     )
     return save_filtered(filtered, cfg)
+
+
+class PyClauseRuleEngine:
+    """Adaptador para el protocolo `RuleEngine` de inference.py.
+
+    Usa QAHandler de PyClause con dirección "tail": dada la consulta
+    (known_value, target_prop, ?), devuelve [(valor, confianza, rule_id)].
+    """
+
+    def __init__(self, loader, qa_handler, rules: list[Rule]):
+        self.loader = loader
+        self.qa = qa_handler
+        # Mapa relación → regla de mayor confianza, para poder devolver rule_id.
+        self._top_rule_by_rel: dict[str, Rule] = {}
+        for r in rules:
+            prev = self._top_rule_by_rel.get(r.head)
+            if prev is None or r.confidence > prev.confidence:
+                self._top_rule_by_rel[r.head] = r
+
+    def query(
+        self,
+        known_props: dict[str, str],
+        target_prop: str,
+        confidence_threshold: float,
+    ) -> list[tuple[str, float, str]]:
+        """Devuelve [(valor, confianza, rule_id)] o []."""
+        # Construimos consultas (head_value, target_prop) para cada valor conocido.
+        queries = [(v, target_prop) for v in known_props.values()]
+        if not queries:
+            return []
+
+        try:
+            self.qa.calculate_answers(queries=queries, loader=self.loader, direction="tail")
+            raw = self.qa.get_answers(as_string=True)
+        except Exception:
+            return []
+
+        best_rule = self._top_rule_by_rel.get(target_prop)
+        rid = best_rule.text if best_rule else "unknown"
+
+        seen: dict[str, float] = {}
+        for answers_for_query in raw:
+            for value, confidence in answers_for_query:
+                conf = float(confidence)
+                if conf >= confidence_threshold:
+                    if conf > seen.get(value, -1.0):
+                        seen[value] = conf
+
+        results = [(v, c, rid) for v, c in seen.items()]
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
