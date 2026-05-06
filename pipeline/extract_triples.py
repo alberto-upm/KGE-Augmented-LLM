@@ -1,7 +1,7 @@
 """Extracción de tripletas y división por bloques de incidencia.
 
 Para grafos con bloques identificables (incidencias):
-  - Lee el TTL con parser manual (fallback si rdflib falla)
+  - Lee el TTL con rdflib
   - Agrupa tripletas por incidencia (sujeto-bloque)
   - Divide 90 % train / 10 % test a nivel de incidencia completa
   - Escribe tres ficheros en data/<grafo>/raw/:
@@ -20,94 +20,114 @@ from __future__ import annotations
 
 import pickle
 import random
-import re
 from collections import defaultdict
 from pathlib import Path
 
 from .io_graph import Triple, _shorten
 
 
-# ── Parser TTL manual ─────────────────────────────────────────────────────────
+# ── Utilidades TTL ────────────────────────────────────────────────────────────
 
-def _parse_prefixes(text: str) -> dict[str, str]:
-    prefixes: dict[str, str] = {}
-    for m in re.finditer(r"@prefix\s+(\w*):\s*<([^>]+)>\s*\.", text):
-        prefixes[m.group(1)] = m.group(2)
-    return prefixes
-
-
-def _resolve(token: str, declared: dict[str, str], cfg_prefixes: dict[str, str]) -> str:
-    token = token.strip().rstrip(";,. ")
-    if token.startswith("<") and token.endswith(">"):
-        return _shorten(token[1:-1], cfg_prefixes)
-    if ":" in token and not token.startswith("_:"):
-        pfx, local = token.split(":", 1)
-        if pfx in declared:
-            return _shorten(declared[pfx] + local, cfg_prefixes)
-    return token
+def _expand_curie(curie: str, prefixes: dict[str, str]) -> str:
+    if ":" in curie and not curie.startswith("http"):
+        prefix, local = curie.split(":", 1)
+        if prefix in prefixes:
+            return prefixes[prefix] + local
+    return curie
 
 
-def _parse_ttl_blocks(path: Path, cfg_prefixes: dict[str, str]) -> dict[str, list[Triple]]:
-    """Lee el TTL y devuelve dict {block_id: [tripletas]}."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    declared = _parse_prefixes(text)
-
-    blocks: dict[str, list[Triple]] = defaultdict(list)
-    pending: list[str] = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("@") or line.startswith("#"):
-            continue
-        pending.append(line)
-        if not line.endswith("."):
-            continue
-
-        block = " ".join(pending).rstrip(". ").strip()
-        pending = []
-
-        tokens = block.split()
-        if len(tokens) < 3:
-            continue
-
-        subj = _resolve(tokens[0], declared, cfg_prefixes)
-        rest = " ".join(tokens[1:])
-        for pair in rest.split(";"):
-            parts = pair.split()
-            if len(parts) >= 2:
-                pred = _resolve(parts[0], declared, cfg_prefixes)
-                obj  = _resolve(parts[1], declared, cfg_prefixes)
-                blocks[subj].append((subj, pred, obj))
-
-    return dict(blocks)
+def _extract_label(node, cfg_prefixes: dict[str, str]) -> str:
+    s = str(node)
+    if "#" in s:
+        return s.split("#")[-1]
+    return s.split("/")[-1]
 
 
-def _parse_ttl_blocks_rdflib(path: Path, cfg_prefixes: dict[str, str]) -> dict[str, list[Triple]]:
+def _load_ttl_graph(path: Path):
     from rdflib import Graph  # type: ignore
 
     g = Graph()
     g.parse(str(path), format="turtle")
-    blocks: dict[str, list[Triple]] = defaultdict(list)
+    return g
+
+
+def extract_all_triples(g, cfg_prefixes: dict[str, str]) -> list[Triple]:
+    """Devuelve todas las tripletas útiles del grafo, omitiendo rdf:type."""
+    from rdflib.namespace import RDF  # type: ignore
+
+    triples: list[Triple] = []
+    skipped = 0
     for s, p, o in g:
-        subj = _shorten(str(s), cfg_prefixes)
-        blocks[subj].append((
-            subj,
-            _shorten(str(p), cfg_prefixes),
-            _shorten(str(o), cfg_prefixes),
-        ))
+        if p == RDF.type:
+            skipped += 1
+            continue
+        head = _extract_label(s, cfg_prefixes)
+        relation = _extract_label(p, cfg_prefixes)
+        tail = _extract_label(o, cfg_prefixes)
+        triples.append((head, relation, tail))
+    print(f"      {len(triples):,} tripletas extraídas  ({skipped:,} rdf:type omitidas)")
+    return triples
+
+
+def _incident_subjects_from_graph(g, block_predicate: str, block_value: str, cfg_prefixes: dict[str, str]) -> set[str]:
+    from rdflib import URIRef  # type: ignore
+    from rdflib.namespace import RDF  # type: ignore
+
+    subjects: set[str] = set()
+    pred_uri = _expand_curie(block_predicate, cfg_prefixes) if block_predicate else ""
+    value_uri = _expand_curie(block_value, cfg_prefixes) if block_value else ""
+
+    for s, p, o in g:
+        if block_predicate:
+            if pred_uri:
+                if p != URIRef(pred_uri):
+                    continue
+            elif _extract_label(p, cfg_prefixes) != block_predicate:
+                continue
+        if block_value:
+            if value_uri:
+                if str(o) != value_uri:
+                    continue
+            elif _extract_label(o, cfg_prefixes) != block_value:
+                continue
+        subjects.add(_extract_label(s, cfg_prefixes))
+
+    return subjects
+
+
+def _group_triples_by_subject(triples: list[Triple]) -> dict[str, list[Triple]]:
+    blocks: dict[str, list[Triple]] = defaultdict(list)
+    for s, p, o in triples:
+        blocks[s].append((s, p, o))
     return dict(blocks)
 
 
-def _load_blocks_ttl(path: Path, cfg_prefixes: dict[str, str]) -> dict[str, list[Triple]]:
+def _load_incident_blocks_ttl(
+    path: Path,
+    cfg_prefixes: dict[str, str],
+    block_predicate: str,
+    block_value: str,
+) -> dict[str, list[Triple]]:
     try:
-        blocks = _parse_ttl_blocks_rdflib(path, cfg_prefixes)
-        print(f"[convert] rdflib OK: {len(blocks):,} bloques leídos.")
-        return blocks
+        g = _load_ttl_graph(path)
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "No se pudo leer el TTL porque `rdflib` no está instalado. "
+            "Instálalo en el entorno activo para ejecutar la conversión."
+        ) from e
     except Exception as e:
-        print(f"[convert] rdflib falló ({e}); usando parser manual.")
-        blocks = _parse_ttl_blocks(path, cfg_prefixes)
-        print(f"[convert] Parser manual: {len(blocks):,} bloques leídos.")
-        return blocks
+        raise RuntimeError(
+            f"rdflib no pudo parsear {path}. Corrige el TTL o revisa la versión de rdflib. "
+            f"Error original: {e}"
+        ) from e
+
+    print(f"[convert] {len(g):,} tripletas cargadas.")
+    triples = extract_all_triples(g, cfg_prefixes)
+    block_subjects = _incident_subjects_from_graph(g, block_predicate, block_value, cfg_prefixes)
+    blocks = _group_triples_by_subject(triples)
+    incident_blocks = {s: blocks[s] for s in block_subjects if s in blocks}
+    print(f"[convert] Incidencias únicas: {len(incident_blocks):,}")
+    return incident_blocks
 
 
 # ── Loaders planos (sin bloques) ──────────────────────────────────────────────
@@ -169,23 +189,6 @@ def _write_4col(blocks: dict[str, list[Triple]], path: Path) -> None:
 
 # ── Conversión con split 90/10 por bloques (incidencias) ─────────────────────
 
-def _filter_blocks_by_predicate(
-    blocks: dict[str, list[Triple]],
-    block_predicate: str,
-    block_value: str,
-) -> dict[str, list[Triple]]:
-    """Filtra bloques que contengan (s, block_predicate, block_value)."""
-    if not block_predicate and not block_value:
-        return blocks
-    out: dict[str, list[Triple]] = {}
-    for bid, triples in blocks.items():
-        for s, p, o in triples:
-            if (not block_predicate or p == block_predicate) and \
-               (not block_value or o == block_value):
-                out[bid] = triples
-                break
-    return out
-
 
 def convert_incidents(cfg: dict) -> dict[str, Path]:
     """Convierte el TTL de incidencias con split 90/10 por bloque.
@@ -216,13 +219,9 @@ def convert_incidents(cfg: dict) -> dict[str, Path]:
         }
 
     print(f"[convert] Leyendo {src_path} y agrupando por bloques…")
-    all_blocks = _load_blocks_ttl(src_path, cfg_pfx)
-
-    # Filtrar bloques que sean incidencias reales
     block_pred  = graph_cfg.get("block_predicate", "")
     block_val   = graph_cfg.get("block_value", "")
-    incident_blocks = _filter_blocks_by_predicate(all_blocks, block_pred, block_val)
-    print(f"[convert] Bloques (incidencias) identificados: {len(incident_blocks):,}")
+    incident_blocks = _load_incident_blocks_ttl(src_path, cfg_pfx, block_pred, block_val)
 
     # División 90 / 10 por bloque completo
     block_ids = list(incident_blocks.keys())
