@@ -118,6 +118,17 @@ def cmd_eval(cfg: dict, args: argparse.Namespace) -> None:
         )
 
 
+def cmd_convert(cfg: dict, args: argparse.Namespace) -> None:
+    """Extrae tripletas del grafo de entrada y las guarda como TSV."""
+    from pipeline.extract_triples import convert
+
+    out = convert(cfg)
+    print(f"\nPróximo paso: actualiza el YAML con:")
+    print(f"  format: tsv")
+    print(f"  path:   {out}")
+    print(f"  has_header: false")
+
+
 def cmd_serve(cfg: dict, args: argparse.Namespace) -> None:
     """Bucle interactivo: carga el ganador KGE + CBR + reglas y crea una incidencia."""
     import json
@@ -206,7 +217,7 @@ def cmd_serve(cfg: dict, args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="KGE-Augmented LLM pipeline")
     parser.add_argument("--config", required=True, help="Ruta al YAML de configuración")
-    parser.add_argument("--mode", choices=["train", "eval", "serve"], default="train")
+    parser.add_argument("--mode", choices=["train", "eval", "serve", "convert"], default="train")
     parser.add_argument("--only", choices=["split", "rules", "kge", "cbr"], default=None)
     parser.add_argument("--skip-rules", action="store_true")
     parser.add_argument("--no-llm", action="store_true")
@@ -217,9 +228,10 @@ def main() -> None:
         cfg.setdefault("llm", {})["use_llm"] = False
 
     {
-        "train": cmd_train,
-        "eval": cmd_eval,
-        "serve": cmd_serve,
+        "train":   cmd_train,
+        "eval":    cmd_eval,
+        "serve":   cmd_serve,
+        "convert": cmd_convert,
     }[args.mode](cfg, args)
 
 
