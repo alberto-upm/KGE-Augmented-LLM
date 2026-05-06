@@ -141,12 +141,12 @@ def _group_triples_by_subject(triples: list[Triple]) -> dict[str, list[Triple]]:
     return dict(blocks)
 
 
-def _load_incident_blocks_ttl(
+def _load_incident_data_ttl(
     path: Path,
     cfg_prefixes: dict[str, str],
     block_predicate: str,
     block_value: str,
-) -> dict[str, list[Triple]]:
+) -> tuple[list[Triple], set[str]]:
     from rdflib import Graph  # type: ignore
 
     try:
@@ -186,10 +186,59 @@ def _load_incident_blocks_ttl(
 
     print(f"[convert] {total_loaded:,} tripletas cargadas.")
     print(f"      {total_extracted:,} tripletas extraídas  ({total_skipped_type:,} rdf:type omitidas)")
-    blocks = _group_triples_by_subject(all_triples)
-    incident_blocks = {s: blocks[s] for s in incident_subjects if s in blocks}
-    print(f"[convert] Incidencias únicas: {len(incident_blocks):,}")
-    return incident_blocks
+    print(f"[convert] Incidencias únicas: {len(incident_subjects):,}")
+    return all_triples, incident_subjects
+
+
+def _split_by_incident_ids(
+    triples: list[Triple],
+    incident_ids: set[str],
+    train_ratio: float,
+    seed: int,
+) -> tuple[list[Triple], list[Triple], dict[str, list[Triple]], dict[str, list[Triple]]]:
+    rng = random.Random(seed)
+
+    ordered_incidents = sorted(incident_ids)
+    rng.shuffle(ordered_incidents)
+
+    n_total = len(ordered_incidents)
+    n_train = int(n_total * train_ratio)
+    train_ids = set(ordered_incidents[:n_train])
+    test_ids = set(ordered_incidents[n_train:])
+
+    print(
+        f"[convert] Incidencias  →  train: {len(train_ids):,}  "
+        f"test: {len(test_ids):,}"
+    )
+
+    train_triples: list[Triple] = []
+    test_triples: list[Triple] = []
+    non_incident = 0
+
+    for triple in triples:
+        head = triple[0]
+        if head in train_ids:
+            train_triples.append(triple)
+        elif head in test_ids:
+            test_triples.append(triple)
+        else:
+            train_triples.append(triple)
+            non_incident += 1
+
+    if non_incident:
+        print(f"[convert] Tripletas auxiliares (no-incidencia) añadidas a train: {non_incident:,}")
+
+    print(
+        f"[convert] Tripletas  →  train: {len(train_triples):,}  "
+        f"test: {len(test_triples):,}"
+    )
+
+    train_blocks_all = _group_triples_by_subject(train_triples)
+    test_blocks_all = _group_triples_by_subject(test_triples)
+    train_blocks = {bid: train_blocks_all[bid] for bid in train_ids if bid in train_blocks_all}
+    test_blocks = {bid: test_blocks_all[bid] for bid in test_ids if bid in test_blocks_all}
+
+    return train_triples, test_triples, train_blocks, test_blocks
 
 
 # ── Loaders planos (sin bloques) ──────────────────────────────────────────────
@@ -283,24 +332,16 @@ def convert_incidents(cfg: dict) -> dict[str, Path]:
     print(f"[convert] Leyendo {src_path} y agrupando por bloques…")
     block_pred  = graph_cfg.get("block_predicate", "")
     block_val   = graph_cfg.get("block_value", "")
-    incident_blocks = _load_incident_blocks_ttl(src_path, cfg_pfx, block_pred, block_val)
+    all_triples, incident_ids = _load_incident_data_ttl(src_path, cfg_pfx, block_pred, block_val)
+    train_ratio = 1.0 - test_ratio
+    train_triples, _test_triples, train_blocks, test_blocks = _split_by_incident_ids(
+        all_triples,
+        incident_ids,
+        train_ratio=train_ratio,
+        seed=seed,
+    )
 
-    # División 90 / 10 por bloque completo
-    block_ids = list(incident_blocks.keys())
-    random.Random(seed).shuffle(block_ids)
-    n_test = max(1, int(len(block_ids) * test_ratio))
-    test_ids  = set(block_ids[:n_test])
-    train_ids = set(block_ids[n_test:])
-
-    train_blocks = {bid: incident_blocks[bid] for bid in train_ids}
-    test_blocks  = {bid: incident_blocks[bid] for bid in test_ids}
-
-    train_triples_flat = [t for ts in train_blocks.values() for t in ts]
-
-    print(f"[convert] Train: {len(train_ids):,} incidencias, {len(train_triples_flat):,} tripletas")
-    print(f"[convert] Test:  {len(test_ids):,}  incidencias")
-
-    _write_3col(train_triples_flat, train_triples_path)
+    _write_3col(train_triples, train_triples_path)
     _write_4col(train_blocks, train_blocks_path)
     _write_4col(test_blocks, test_system_path)
 

@@ -123,10 +123,15 @@ def cmd_convert(cfg: dict, args: argparse.Namespace) -> None:
     from pipeline.extract_triples import convert
 
     out = convert(cfg)
-    print(f"\nPróximo paso: actualiza el YAML con:")
-    print(f"  format: tsv")
-    print(f"  path:   {out}")
-    print(f"  has_header: false")
+    if isinstance(out, dict):
+        print("\nResumen de salida:")
+        for name, path in out.items():
+            print(f"  {name}: {path}")
+    else:
+        print(f"\nPróximo paso: actualiza el YAML con:")
+        print(f"  format: tsv")
+        print(f"  path:   {out}")
+        print(f"  has_header: false")
 
 
 def cmd_serve(cfg: dict, args: argparse.Namespace) -> None:
