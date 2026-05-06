@@ -51,7 +51,45 @@ def _load_ttl_graph(path: Path):
     return g
 
 
-def extract_all_triples(g, cfg_prefixes: dict[str, str]) -> list[Triple]:
+def _split_ttl_into_chunks(path: Path, blocks_per_chunk: int = 1000) -> list[str]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+
+    prefix_lines: list[str] = []
+    blocks: list[str] = []
+    current: list[str] = []
+    seen_data = False
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not seen_data and (not stripped or stripped.startswith("@prefix") or stripped.startswith("#")):
+            if stripped.startswith("@prefix"):
+                prefix_lines.append(stripped)
+            continue
+
+        if not stripped:
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+                seen_data = True
+            continue
+
+        seen_data = True
+        current.append(raw_line)
+
+    if current:
+        blocks.append("\n".join(current))
+
+    prefix_blob = "\n".join(prefix_lines)
+    chunks: list[str] = []
+    for i in range(0, len(blocks), blocks_per_chunk):
+        chunk_blocks = blocks[i : i + blocks_per_chunk]
+        chunk = prefix_blob + "\n\n" + "\n\n".join(chunk_blocks) + "\n"
+        chunks.append(chunk)
+    return chunks
+
+
+def extract_all_triples(g, cfg_prefixes: dict[str, str], *, verbose: bool = True) -> list[Triple]:
     """Devuelve todas las tripletas útiles del grafo, omitiendo rdf:type."""
     from rdflib.namespace import RDF  # type: ignore
 
@@ -65,7 +103,8 @@ def extract_all_triples(g, cfg_prefixes: dict[str, str]) -> list[Triple]:
         relation = _extract_label(p, cfg_prefixes)
         tail = _extract_label(o, cfg_prefixes)
         triples.append((head, relation, tail))
-    print(f"      {len(triples):,} tripletas extraídas  ({skipped:,} rdf:type omitidas)")
+    if verbose:
+        print(f"      {len(triples):,} tripletas extraídas  ({skipped:,} rdf:type omitidas)")
     return triples
 
 
@@ -108,24 +147,47 @@ def _load_incident_blocks_ttl(
     block_predicate: str,
     block_value: str,
 ) -> dict[str, list[Triple]]:
+    from rdflib import Graph  # type: ignore
+
     try:
-        g = _load_ttl_graph(path)
+        chunks = _split_ttl_into_chunks(path)
+    except Exception as e:
+        raise RuntimeError(f"No se pudo preparar el TTL por bloques desde {path}. Error: {e}") from e
+
+    all_triples: list[Triple] = []
+    incident_subjects: set[str] = set()
+    total_loaded = 0
+    total_extracted = 0
+    total_skipped_type = 0
+
+    try:
+        for idx, chunk in enumerate(chunks, start=1):
+            g = Graph()
+            try:
+                g.parse(data=chunk, format="turtle")
+            except Exception as e:
+                raise RuntimeError(
+                    f"rdflib no pudo parsear el bloque/chunk {idx}/{len(chunks)} de {path}. "
+                    f"Error original: {e}"
+                ) from e
+            total_loaded += len(g)
+            chunk_triples = extract_all_triples(g, cfg_prefixes, verbose=False)
+            all_triples.extend(chunk_triples)
+            total_extracted += len(chunk_triples)
+            total_skipped_type += len(g) - len(chunk_triples)
+            incident_subjects.update(
+                _incident_subjects_from_graph(g, block_predicate, block_value, cfg_prefixes)
+            )
     except ModuleNotFoundError as e:
         raise RuntimeError(
             "No se pudo leer el TTL porque `rdflib` no está instalado. "
             "Instálalo en el entorno activo para ejecutar la conversión."
         ) from e
-    except Exception as e:
-        raise RuntimeError(
-            f"rdflib no pudo parsear {path}. Corrige el TTL o revisa la versión de rdflib. "
-            f"Error original: {e}"
-        ) from e
 
-    print(f"[convert] {len(g):,} tripletas cargadas.")
-    triples = extract_all_triples(g, cfg_prefixes)
-    block_subjects = _incident_subjects_from_graph(g, block_predicate, block_value, cfg_prefixes)
-    blocks = _group_triples_by_subject(triples)
-    incident_blocks = {s: blocks[s] for s in block_subjects if s in blocks}
+    print(f"[convert] {total_loaded:,} tripletas cargadas.")
+    print(f"      {total_extracted:,} tripletas extraídas  ({total_skipped_type:,} rdf:type omitidas)")
+    blocks = _group_triples_by_subject(all_triples)
+    incident_blocks = {s: blocks[s] for s in incident_subjects if s in blocks}
     print(f"[convert] Incidencias únicas: {len(incident_blocks):,}")
     return incident_blocks
 
